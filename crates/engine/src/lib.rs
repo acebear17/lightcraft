@@ -280,6 +280,9 @@ pub struct Session {
     /// Set by a command whose change must not rewrite the photo's XMP sidecar even with auto-write on
     /// (a catalog-only edit of data the sidecar writer does not emit); consumed when the command ends.
     pub(crate) skip_auto_write: bool,
+    /// What the last undo or redo step's folder move across volumes could not remove from the old
+    /// place ([`cmd::browse::folder_on_disk`]); `edit.undo` / `edit.redo` report it as `warnings`.
+    pub(crate) folder_left_behind: Vec<String>,
     /// The order of Reload from Disk runs, so an older one finishing late is dropped ([`cmd::reload`]).
     pub(crate) reload_tickets: cmd::reload::Tickets,
     /// Photos whose automatic XMP sidecar write failed (their folder offline, read-only or full), written again by
@@ -493,6 +496,7 @@ impl Session {
             pending_sidecar_repairs: Vec::new(),
             interaction: None,
             skip_auto_write: false,
+            folder_left_behind: Vec::new(),
             reload_tickets: Default::default(),
             unsaved_sidecars: Default::default(),
             denoise: Default::default(),
@@ -877,6 +881,7 @@ impl Session {
     /// library follows them (a logged change outside the undo history), so none goes missing; the
     /// folder is only moved back when no file was left behind at its new path.
     fn apply_with_files(&mut self, entry: &mut UndoEntry, fs: &dyn rename::MoveFs) -> Result<Op> {
+        self.folder_left_behind.clear();
         // The entry is detached from self.undo/self.redo: include it before any global
         // repair can retire, then retry revalidates it before moving its own packets.
         rename::validate_sidecars(fs, &entry.retry_sidecars).map_err(|e| EngineError::Other(format!("can't move the files back: {e}")))?;
@@ -889,7 +894,8 @@ impl Session {
         let op = &entry.op;
         let folder = entry.folder.as_ref();
         if let Some(f) = folder {
-            cmd::browse::folder_on_disk(&f.from, &f.to).map_err(|e| EngineError::Other(format!("can't move the folder back: {e}")))?;
+            self.folder_left_behind =
+                cmd::browse::folder_on_disk(&f.from, &f.to).map_err(|e| EngineError::Other(format!("can't move the folder back: {e}")))?;
         }
         let undo_folder = || {
             if let Some(f) = folder {

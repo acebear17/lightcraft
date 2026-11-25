@@ -266,8 +266,8 @@ pub fn specs() -> Vec<CommandSpec> {
                     .filter(|n| !n.is_empty() && !n.contains(['/', '\\']) && *n != "." && *n != "..")
                     .ok_or_else(|| bad("folder.rename", "give a folder name (no slashes)"))?;
                 let to = Path::new(&from).with_file_name(name).to_string_lossy().to_string();
-                let n = move_folder(s, &from, &to).map_err(|e| bad("folder.rename", e))?;
-                Ok(json!({"path": to, "relinked": n}))
+                let moved = move_folder(s, &from, &to).map_err(|e| bad("folder.rename", e))?;
+                Ok(moved_result(&to, moved))
             }
         ),
         cmd!(
@@ -275,7 +275,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Move Folder",
             [],
             None,
-            "{path, into: destination folder} — move a folder on disk into another and relink the photos in it; one undo step (undo moves it back, refused if the old place is taken); refused for the home folder and its Pictures, Desktop and Downloads → {path, relinked}",
+            "{path, into: destination folder} — move a folder on disk into another and relink the photos in it; across volumes everything in it is copied, verified and only then removed (a link or special file inside refuses the move; what can't be removed from the old place afterwards is listed in `warnings`); one undo step (undo moves it back, refused if the old place is taken); refused for the home folder and its Pictures, Desktop and Downloads → {path, relinked, warnings?}",
             always,
             |s, p| {
                 let from = str_param(p, "path").ok_or_else(|| bad("folder.move", "missing path"))?.trim_end_matches(['/', '\\']).to_string();
@@ -283,8 +283,8 @@ pub fn specs() -> Vec<CommandSpec> {
                 let into = str_param(p, "into").ok_or_else(|| bad("folder.move", "missing into"))?;
                 let name = Path::new(&from).file_name().ok_or_else(|| bad("folder.move", "bad path"))?;
                 let to = Path::new(into).join(name).to_string_lossy().to_string();
-                let n = move_folder(s, &from, &to).map_err(|e| bad("folder.move", e))?;
-                Ok(json!({"path": to, "relinked": n}))
+                let moved = move_folder(s, &from, &to).map_err(|e| bad("folder.move", e))?;
+                Ok(moved_result(&to, moved))
             }
         ),
         cmd!(
@@ -329,8 +329,10 @@ pub fn specs() -> Vec<CommandSpec> {
 
 /// Rename `from` to `to` on disk (a folder; everything in it goes along). Never overwrites:
 /// refused when `to` exists (a case-only rename on a case-insensitive file system goes through
-/// a temporary name). Missing parents of `to` are created.
-pub(crate) fn rename_folder_on_disk(from: &str, to: &str) -> std::result::Result<(), String> {
+/// a temporary name). Missing parents of `to` are created. Onto another volume the folder is
+/// copied, checked and only then removed (`move_folder_across_volumes`); returns what of the old
+/// folder could not be removed then (empty after a rename).
+pub(crate) fn rename_folder_on_disk(from: &str, to: &str) -> std::result::Result<Vec<String>, String> {
     let (src, dst) = (Path::new(from), Path::new(to));
     if !src.is_dir() {
         return Err(format!("{from} is not a folder (moved or deleted?)"));
@@ -351,27 +353,31 @@ pub(crate) fn rename_folder_on_disk(from: &str, to: &str) -> std::result::Result
             return Err(format!("{} already exists", tmp.display()));
         }
         std::fs::rename(src, &tmp).map_err(|e| format!("{from} → {to}: {e}"))?;
-        return std::fs::rename(&tmp, dst).map_err(|e| {
+        return std::fs::rename(&tmp, dst).map(|()| Vec::new()).map_err(|e| {
             let _ = std::fs::rename(&tmp, src);
             format!("{from} → {to}: {e}")
         });
     }
-    std::fs::rename(src, dst).map_err(|e| format!("{from} → {to}: {e}"))
+    std::fs::rename(src, dst)
+        .map(|()| Vec::new())
+        .or_else(|e| if e.kind() == std::io::ErrorKind::CrossesDevices { crate::rename::move_folder_across_volumes(src, dst) } else { Err(e) })
+        .map_err(|e| format!("{from} → {to}: {e}"))
 }
 
 /// Do an undo step's folder change on disk: rename `from` → `to`; with `to` empty, remove the
-/// empty folder `from`; with `from` empty, create the folder `to`. Never overwrites.
-pub(crate) fn folder_on_disk(from: &str, to: &str) -> std::result::Result<(), String> {
+/// empty folder `from`; with `from` empty, create the folder `to`. Never overwrites. Returns what
+/// a move across volumes could not remove from the old place ([`rename_folder_on_disk`]).
+pub(crate) fn folder_on_disk(from: &str, to: &str) -> std::result::Result<Vec<String>, String> {
     match (from.is_empty(), to.is_empty()) {
         (false, false) => rename_folder_on_disk(from, to),
-        (false, true) => remove_empty_folder(from),
+        (false, true) => remove_empty_folder(from).map(|()| Vec::new()),
         (true, false) => {
             if Path::new(to).exists() {
                 return Err(format!("{to} already exists"));
             }
-            std::fs::create_dir(to).map_err(|e| format!("{to}: {e}"))
+            std::fs::create_dir(to).map(|()| Vec::new()).map_err(|e| format!("{to}: {e}"))
         }
-        (true, true) => Ok(()),
+        (true, true) => Ok(Vec::new()),
     }
 }
 
@@ -514,10 +520,22 @@ fn follow_library_folder(chosen: &mut Option<String>, from: &str, to: &str) {
     }
 }
 
+/// `folder.rename` / `folder.move`'s result: the folder's new path, how many photos were relinked
+/// and, when the folder went to another volume, what could not be removed from the old place.
+fn moved_result(to: &str, (relinked, left): (usize, Vec<String>)) -> Value {
+    let mut result = json!({"path": to, "relinked": relinked});
+    if !left.is_empty() {
+        result["warnings"] = json!(left);
+    }
+    result
+}
+
 /// Rename or move a folder on disk (everything in it goes along, sidecars included) and relink
 /// the photos inside, as one undo step: undo renames the folder back and restores the photos'
 /// paths, redo repeats the move — each refused (and reported) when the destination is taken.
-pub(crate) fn move_folder(s: &mut Session, from: &str, to: &str) -> std::result::Result<usize, String> {
+/// Returns how many photos were relinked and what of the old folder could not be removed after
+/// a move across volumes ([`rename_folder_on_disk`]).
+pub(crate) fn move_folder(s: &mut Session, from: &str, to: &str) -> std::result::Result<(usize, Vec<String>), String> {
     let (src, dst) = (Path::new(from), Path::new(to));
     if !src.is_dir() {
         return Err(format!("{from} is not a folder"));
@@ -534,7 +552,7 @@ pub(crate) fn move_folder(s: &mut Session, from: &str, to: &str) -> std::result:
     // Repairs retain their exact old paths, including those on surviving history entries.
     // Complete them before the directory moves; an unavailable repair leaves it in place.
     s.repair_sidecars_with(&crate::rename::RealFs).map_err(|e| e.to_string())?;
-    rename_folder_on_disk(from, to)?;
+    let left = rename_folder_on_disk(from, to)?;
     let mut ops: Vec<Op> = s
         .catalog
         .photos()
@@ -558,11 +576,15 @@ pub(crate) fn move_folder(s: &mut Session, from: &str, to: &str) -> std::result:
     let folder = crate::FolderMove { from: to.to_string(), to: from.to_string() };
     if let Err(e) = s.commit_with_folder(&label, Op::Batch { ops }, folder) {
         // the catalog didn't take it: put the folder back where the photos still point
-        let back = rename_folder_on_disk(to, from).err().map(|b| format!("; moving it back failed too: {b}")).unwrap_or_default();
+        let back = match rename_folder_on_disk(to, from) {
+            Ok(stuck) if stuck.is_empty() => String::new(),
+            Ok(stuck) => format!("; it was moved back, but {}", stuck.join("; ")),
+            Err(b) => format!("; moving it back failed too: {b}"),
+        };
         return Err(format!("{e}{back}"));
     }
     follow_folder(s, from, to);
-    Ok(n)
+    Ok((n, left))
 }
 
 /// Whether `path` is the user's home folder or one of its standard places (Pictures, Desktop,

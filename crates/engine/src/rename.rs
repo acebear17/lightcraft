@@ -38,7 +38,7 @@ mod plan;
 mod sidecar;
 mod tokens;
 
-pub(crate) use fs::{MoveFs, RealFs};
+pub(crate) use fs::{MoveFs, RealFs, move_folder_across_volumes};
 #[cfg(test)]
 use fs::{folded_path, same_contents};
 pub(crate) use moves::move_all;
