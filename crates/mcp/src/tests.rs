@@ -119,8 +119,8 @@ fn path_writes_never_replace_an_original() {
     let r = call_tool(&mut b, "render_photo", &json!({"id": id, "path": path}));
     assert!(r.is_error, "{r:?}");
     assert!(b.call("ui.render", json!({"id": id, "path": path})).unwrap_err().contains("original"));
-    let r = b.call("app.export", json!({"ids": [id], "path": path})).unwrap();
-    assert!(r["files"][0]["error"].as_str().is_some_and(|e| e.contains("never writes over an original")), "{r}");
+    let e = b.call("app.export", json!({"ids": [id], "path": path})).unwrap_err();
+    assert!(e.contains("never writes over an original"), "{e}");
     assert_eq!(std::fs::read(&orig).unwrap(), png, "the original is untouched");
     // another path still works
     let r = call_tool(&mut b, "render_photo", &json!({"id": id, "path": base.join("render.png").to_string_lossy()}));

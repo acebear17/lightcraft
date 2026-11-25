@@ -85,6 +85,7 @@ impl Headless {
         let after = self.session.after_export(&opts)?;
         let items = prepare_batch(&mut self.session, &ids, &opts)?;
         let total = items.len();
+        let stop_on_error = total == 1;
         let mut hook = self.progress.take();
         let mut cancelled = false;
         let files = run_batch(
@@ -93,7 +94,7 @@ impl Headless {
             &Destination { dir: dir.to_string(), exact: exact.map(str::to_string) },
             write,
             &|path| Path::new(path).exists(),
-            false,
+            stop_on_error,
             &mut |done, name| {
                 cancelled = hook.as_mut().is_some_and(|h| !h(done, total, name));
                 !cancelled
@@ -105,8 +106,8 @@ impl Headless {
         if cancelled {
             return Err("cancelled".into());
         }
-        // Single-photo exports also report path/width/height at the top level (back-compat).
-        let mut out = files.first().cloned().unwrap_or_else(|| json!({}));
+        // Keep top-level fields for successful exports (back-compat), but don't promote a per-file error.
+        let mut out = files.first().filter(|file| file.get("error").is_none()).cloned().unwrap_or_else(|| json!({}));
         if let Some(photos) = after.run(&files, false) {
             out["applePhotos"] = photos;
         }
@@ -310,7 +311,7 @@ mod tests {
 
         let mut h = Headless::demo();
         let mut ids = Vec::new();
-        for (i, name) in ["before.png", "missing.png", "after.png"].into_iter().enumerate() {
+        for (i, name) in ["missing.png", "before.png", "after.png"].into_iter().enumerate() {
             let img = lightcraft_raster::Rgba8 { width: 8, height: 8, data: vec![[20 + i as u8, 3, 9, 255]; 64] };
             let png = lightcraft_codecs::encode_png(&lightcraft_codecs::EncodeImage::rgba8(&img), &lightcraft_codecs::EncodeMeta::default()).unwrap();
             let path = source.join(name);
@@ -324,7 +325,8 @@ mod tests {
         let r = h.call("app.export", json!({"ids": ids, "dir": output.to_string_lossy(), "longEdge": 32, "format": "png"})).unwrap();
         let files = r["files"].as_array().unwrap();
         assert_eq!(files.len(), 3, "{r}");
-        assert!(files[1]["error"].as_str().is_some_and(|e| e.contains("missing.png")), "{r}");
+        assert!(files[0]["error"].as_str().is_some_and(|e| e.contains("missing.png")), "{r}");
+        assert!(r.get("error").is_none(), "{r}");
         assert!(output.join("before.png").is_file(), "{r}");
         assert!(output.join("after.png").is_file(), "{r}");
 
