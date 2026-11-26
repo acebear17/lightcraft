@@ -77,6 +77,11 @@ const NO_FRAMES_AFTER: Duration = Duration::from_secs(5);
 pub const HIDDEN_WINDOW_ERROR: &str = "the app drew no frame for 5 s, so the request was not run: its window is probably not visible \
 (on Wayland a window on a hidden workspace or minimized is not redrawn, which pauses the app). Bring the window on screen and send it again";
 
+/// The reply to a request that arrives after the app's window went away (it stopped while running,
+/// for example when its renderer failed, or it is quitting) while this port is still open: the
+/// request did not run (issue #4550).
+const STOPPED_ERROR: &str = "LightCraft has stopped, so the request was not run; restart LightCraft (its log says why it stopped)";
+
 /// Reads and writes go through the one `stream` (`&TcpStream` is `Read` and `Write`): no
 /// `try_clone`. On Windows a cloned socket handle is inheritable, so every program the app starts
 /// while a client is connected (a link in the browser, Show in Explorer, an external editor) kept a
@@ -90,7 +95,9 @@ fn serve(stream: TcpStream, tx: &Sender<ControlRequest>, ctx: &egui::Context, id
     serve_stream(stream, |method, params| {
         let (req, rrx) = ControlRequest::new(method, params);
         let state = Arc::clone(&req.state);
-        tx.send(req).ok()?;
+        if tx.send(req).is_err() {
+            return Some(json!({"ok": false, "error": STOPPED_ERROR}));
+        }
         ctx.request_repaint();
         Some(await_reply(&rrx, &state, || ctx.cumulative_pass_nr(), || ctx.request_repaint(), NO_FRAMES_AFTER, REPLY_TIMEOUT))
     });
@@ -257,7 +264,7 @@ fn read_bounded_line(reader: &mut impl BufRead, buf: &mut Vec<u8>, max: usize) -
 }
 
 /// Serve requests from `read`, answering on `out`, until the peer closes, sends something that is
-/// not a request, or `handle` returns `None` (app gone). `handle` gets `(method, params)` and
+/// not a request, or `handle` returns `None`. `handle` gets `(method, params)` and
 /// returns the reply object (the request's `id` is added here).
 fn serve_lines<R: Read, W: Write>(read: R, mut out: W, mut handle: impl FnMut(String, Value) -> Option<Value>) {
     let mut reader = BufReader::new(read);
@@ -393,6 +400,36 @@ mod tests {
         connection.client.read_to_string(&mut eof).unwrap();
         connection.join();
         assert!(eof.is_empty());
+        assert_eq!(open.load(Ordering::SeqCst), 0);
+    }
+
+    /// Issue #4550: once the app has stopped (its window and request receiver are gone) while the
+    /// process and port stay up, every request is answered with why it did not run, not met with
+    /// a connection closed without a reply.
+    #[test]
+    fn requests_after_the_app_stopped_get_an_error_reply() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        client.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+        let (stream, _) = listener.accept().unwrap();
+        let (tx, requests) = channel::<ControlRequest>();
+        drop(requests);
+        let open = Arc::new(AtomicUsize::new(0));
+        client.write_all(b"{\"id\":1,\"method\":\"ui.inspect\"}\n{\"id\":2,\"method\":\"ui.inspect\"}\n").unwrap();
+        client.shutdown(std::net::Shutdown::Write).unwrap();
+        let worker = spawn_connection(stream, tx, egui::Context::default(), Arc::clone(&open), Duration::from_secs(10)).unwrap();
+        let mut text = String::new();
+        let read = BufReader::new(client).read_to_string(&mut text);
+        worker.join().unwrap();
+        assert!(read.is_ok(), "{read:?}");
+        let replies: Vec<Value> = text.lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+        assert_eq!(replies.len(), 2, "one reply per request: {text:?}");
+        for (reply, id) in replies.iter().zip([1, 2]) {
+            assert_eq!(reply["id"], id);
+            assert_eq!(reply["ok"], false);
+            assert!(reply["error"].as_str().is_some_and(|e| !e.is_empty()), "{reply}");
+            assert!(reply.get("closed").is_none(), "only an idle close invites a resend: {reply}");
+        }
         assert_eq!(open.load(Ordering::SeqCst), 0);
     }
 
