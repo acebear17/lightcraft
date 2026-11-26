@@ -127,6 +127,13 @@ pub fn fit_even4(ratio: impl Fn(f64) -> f64) -> Option<([f64; 4], f64)> {
     (err.is_finite() && mono).then_some((k, err))
 }
 
+/// How far `ratio` moves the image over `r ∈ [0, 1]`: the largest `|r·(ratio(r) − ratio(0))|`, the displacement from
+/// the undistorted image at the centre's scale, in the units and at the samples of [`fit_even4`]'s error.
+pub fn displacement(ratio: impl Fn(f64) -> f64) -> f64 {
+    let centre = ratio(0.0);
+    (0..=SAMPLES).map(|i| i as f64 / SAMPLES as f64).map(|r| (r * (ratio(r) - centre)).abs()).fold(0.0, f64::max)
+}
+
 /// Fit `gain(r) ≈ 1 + k0·r² + … + k4·r¹⁰` over `r ∈ [0, 1]` (the DNG `FixVignetteRadial` form).
 /// Returns the coefficients and the largest relative gain error.
 pub fn fit_gain5(gain: impl Fn(f64) -> f64) -> Option<([f64; 5], f64)> {

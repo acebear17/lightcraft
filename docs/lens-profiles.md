@@ -79,8 +79,11 @@ files names its profile that way, e.g. a lensfun entry with an extra `<model>24-
 Fisheye and other non-rectilinear lenses get no distortion correction. The profile is converted by least squares
 into the DNG `WarpRectilinear` / `FixVignetteRadial` polynomials, so it goes through the same path as embedded
 corrections: **Enable Profile Corrections** and its Distortion / Vignetting amounts, the CPU and GPU geometry
-stage (one resample), orientation handling and DNG export. A conversion whose radial error exceeds 0.001 of the
-half diagonal, or that would fold the image, is not applied.
+stage (one resample), orientation handling and DNG export. A conversion that would fold the image is not applied,
+and neither is one whose radial error exceeds both 0.001 of the half diagonal (`MAX_WARP_ERROR`) and 5 % of the
+largest displacement the distortion makes, measured from the image at the centre's scale (`MAX_WARP_ERROR_SHARE`).
+The even DNG polynomial can't follow the odd terms of a strong wide-angle barrel within 0.001, so without the second
+limit such a lens got no correction at the focal lengths that need it most (issue #4208).
 
 Normalisation follows lensfun's documentation: distortion and TCA radii are 1 at half the shorter side of the
 calibration frame (its `cropfactor` and `aspect-ratio`), vignetting radii 1 at its corner; the optical centre is
