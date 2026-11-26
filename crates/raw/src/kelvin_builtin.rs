@@ -3,13 +3,16 @@
 //!
 //! Nikon NEFs store only the as-shot multipliers (`WB_RBLevels`) and, in the maker note, the colour temperature the
 //! camera states for the white-balance setting it shot with (`ColorTemperatureAuto`, `0x004f`: tag name from the
-//! ExifTool Nikon tag documentation, read with exiftool run as a black-box tool on the files). A body's points are
-//! the as-shot multipliers of its own photos shot at one preset each, placed at the temperature the camera itself
-//! wrote for that preset. Presets off the daylight locus (fluorescent, flash) and shots with a fine-tune shift are
-//! left out.
+//! ExifTool Nikon tag documentation, read with exiftool run as a black-box tool on the files, or with our own TIFF
+//! reader). A body's points are the as-shot multipliers of its own photos shot at one preset each, placed at the
+//! temperature the camera itself wrote for that preset or, for a body that writes none for its presets, at the
+//! approximate temperature Nikon's reference guide for that body lists. Presets off the daylight locus
+//! (fluorescent, flash) and shots with a fine-tune shift are left out.
 //!
-//! Sources: own photos of each body listed (a reporter's samples, never committed), the camera's own stated
-//! temperatures, and the ExifTool Nikon tag-name documentation (prose). No matrices or third-party data.
+//! Sources: own photos of each body listed (a reporter's samples, never committed), Nikon's own stated
+//! temperatures (in the Z5II's files; for the Z fc, the White balance table of the Nikon Z fc Reference Guide,
+//! <https://onlinemanual.nikonimglib.com/zfc/en/05-02.html>, numbers only), and the ExifTool Nikon tag-name
+//! documentation (prose). No matrices or third-party data.
 use crate::kelvin_presets::KelvinPresets;
 
 /// One body: its make's first word, its Exif model without the make, and five (Kelvin, R/G, B/G) points.
@@ -32,6 +35,22 @@ const BUILTINS: &[Builtin] = &[
             (5500.0, 1.771_484_4, 1.281_25),
             (5990.0, 1.839_843_8, 1.212_890_6),
             (8000.0, 2.097_656_3, 1.089_843_8),
+        ],
+    },
+    // Nikon Z fc (issue #4585): the same presets. The Z fc writes no `ColorTemperatureAuto` for a preset, so the
+    // points sit at the approximate temperatures its reference guide lists: Incandescent 3000 K, Direct sunlight
+    // 5200 K, Cloudy 6000 K, Shade 8000 K, and the Kelvin setting's 5500 K. Natural Auto (the camera wrote 5550 K)
+    // reads back at about 5730 K with a slight magenta tint, the 5000 K Kelvin setting (with a one-step fine-tune)
+    // at about 5070 K; Flash (5400 K listed) at about 6540 K, off this curve as on the Z5II.
+    Builtin {
+        make: "NIKON",
+        model: "Z fc",
+        points: [
+            (3000.0, 1.226_562_5, 2.257_812_5),
+            (5200.0, 1.882_812_5, 1.435_546_9),
+            (5500.0, 1.935_546_9, 1.378_906_3),
+            (6000.0, 2.015_625, 1.304_687_5),
+            (8000.0, 2.318_359_4, 1.171_875),
         ],
     },
 ];
@@ -85,8 +104,26 @@ mod tests {
     }
 
     #[test]
+    fn z_fc_reads_its_own_shots_near_the_camera_temperatures() {
+        let p = find(Some("NIKON CORPORATION"), "NIKON Z fc").unwrap();
+        // the 5000 K Kelvin setting (not a point; shot with a one-step fine-tune)
+        let (t, tint) = p.temp_tint([1.863_281_3, 1.0, 1.496_093_8]).unwrap();
+        assert!((1e6 / t - 1e6 / 5000.0).abs() < 10.0 && tint.abs() < 10.0, "{t} {tint}");
+        // Natural Auto, off the curve: the camera wrote 5550 K for it
+        let (t, tint) = p.temp_tint([2.003_906_3, 1.0, 1.412_109_4]).unwrap();
+        assert!((1e6 / t - 1e6 / 5550.0).abs() < 15.0 && tint.abs() < 15.0, "{t} {tint}");
+        // Flash sits on the daylight side, and the settings keep their order: Incandescent, Natural Auto, Flash
+        let (flash, tint) = p.temp_tint([2.111_328_1, 1.0, 1.255_859_4]).unwrap();
+        assert!((5000.0..7500.0).contains(&flash) && tint.abs() < 10.0, "{flash} {tint}");
+        let (incandescent, _) = p.temp_tint([1.226_562_5, 1.0, 2.257_812_5]).unwrap();
+        assert!(incandescent < t && t < flash, "{incandescent} {t} {flash}");
+    }
+
+    #[test]
     fn matching() {
         assert!(covers(Some("NIKON CORPORATION"), "NIKON Z5_2") && covers(None, "Z5_2") && covers(Some("Nikon"), "nikon z5_2"));
         assert!(!covers(Some("NIKON CORPORATION"), "NIKON Z5") && !covers(Some("SONY"), "Z5_2") && !covers(None, "") && !covers(None, "NIK"));
+        assert!(covers(Some("NIKON CORPORATION"), "NIKON Z fc") && covers(Some("Nikon"), "nikon z FC"));
+        assert!(!covers(Some("NIKON CORPORATION"), "NIKON Z f") && !covers(Some("NIKON CORPORATION"), "NIKON Z 50") && !covers(None, "Zfc"));
     }
 }

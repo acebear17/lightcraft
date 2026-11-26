@@ -421,6 +421,8 @@ mod tests {
     #[test]
     fn covered_models() {
         assert!(covers_camera("NIKON CORPORATION NIKON Z5_2") && covers_camera("NIKON Z5_2") && !covers_camera("NIKON CORPORATION NIKON Z6"));
+        // a model with a space in it: every make / model split is tried
+        assert!(covers_camera("NIKON CORPORATION NIKON Z fc") && covers_camera("NIKON Z fc") && !covers_camera("NIKON CORPORATION NIKON Z f"));
         for c in [
             "SONY ILCA-99M2",
             "SONY DSC-RX10",
