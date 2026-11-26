@@ -41,6 +41,11 @@ connect mode does both: it detects closed connections before sending and reconne
 resends a request that crossed the idle notice once. Any other lost connection after sending a
 request leaves its outcome unknown, and the client must not blindly replay it.
 
+If LightCraft stops while its port stays open (for example its window's renderer failed and the
+"LightCraft stopped" message is showing), each request gets
+`{"ok": false, "error": "LightCraft has stopped, …"}` and is not run, so it is safe to send again
+once LightCraft is restarted; its log says why it stopped.
+
 **Only requests are read.** Every line must be a JSON object with a string `method` (`id` and `params` are
 optional; blank lines are skipped). Anything else — text that isn't JSON, a JSON array or number, an object without
 `method`, invalid UTF-8, or a line longer than 4 MiB — gets one error reply
