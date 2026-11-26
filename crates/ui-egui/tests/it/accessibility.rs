@@ -327,6 +327,38 @@ fn tool_strip_and_toolbar_buttons_are_named_by_label_with_the_shortcut_as_descri
     assert!(leaked.is_empty(), "shortcuts left in names: {leaked:?}");
 }
 
+/// In a window too short for the whole tool strip (#4711), Tab still lands on strip buttons a
+/// person can see: the strip scrolls each focused one into view, rather than leaving it below the
+/// edge or under another button.
+#[test]
+fn tab_scrolls_the_tool_strip_to_the_focused_button() {
+    let mut h = harness(ViewMode::Detail, RightPanel::Edit);
+    h.set_size(vec2(1500.0, 420.0));
+    h.run_steps(4);
+    let strip = |h: &Harness<'_, LightcraftApp>| {
+        let nodes = h.root().children_recursive().map(|n| n.accesskit_node());
+        nodes
+            .filter(|n| n.role() == Role::Toolbar && n.label().as_deref() == Some("Tool strip"))
+            .find_map(|n| n.bounding_box())
+            .expect("the strip's area")
+    };
+    h.root()
+        .children_recursive()
+        .find(|n| n.accesskit_node().role() == Role::Button && n.accesskit_node().label().as_deref() == Some("History & Activity"))
+        .expect("the History & Activity button")
+        .focus();
+    h.run_steps(2);
+    for name in ["More", "Keywords", "Info"] {
+        h.key_press(egui::Key::Tab);
+        // long enough for the scroll animation to finish
+        h.run_steps(30);
+        let focused = h.root().children_recursive().map(|n| n.accesskit_node()).find(|n| n.is_focused()).expect("a focused node");
+        assert_eq!(focused.label().as_deref(), Some(name), "Tab moves down the strip");
+        let (b, s) = (focused.bounding_box().expect("the button's area"), strip(&h));
+        assert!(b.y0 >= s.y0 && b.y1 <= s.y1, "{name} {b:?} is inside the strip {s:?}");
+    }
+}
+
 /// The top bar's Import button carries the key it is bound to now, written for this platform.
 #[test]
 fn import_button_describes_its_shortcut_as_this_platform_writes_it() {
