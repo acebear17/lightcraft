@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Find Missing Photos tells same-name files apart by folder
+- After a library moves to another drive, Find Missing Photos now relinks photos that share a file name with photos
+  in other folders, such as the `IMG_0001.JPG` in every camera folder of an imported Lightroom catalog, by the folder
+  names kept from the old location (issue #3626). When the folders don't make the choice clear, the photo is still
+  skipped and listed rather than guessed.
+
 ### Heal meets its surroundings (process 14)
 - A healed spot is now pinned to the photo around its edge: on a gradient (a sky, a shaded wall, a cheek) it no
   longer leaves a faint disc or ring, and a dark line a few pixels or more beyond the spot's edge no longer smudges

@@ -352,6 +352,30 @@ fn name_key(path: &str) -> String {
     path.rsplit(['/', '\\']).next().unwrap_or_default().to_lowercase()
 }
 
+/// How many folders, counted up from the file, the photo at `from` and the file `file` on disk
+/// have in common, in any letter case. `from` is read by the rule of [`name_key`] (`/` or `\`:
+/// it may be a Windows path), `file` by this system's rule, so a macOS or Linux `a\b.jpg` isn't
+/// in a folder `a`. `D:\Photos\Trip\a.jpg` and `/media/E/Photos/Trip/a.jpg` share 2.
+fn shared_folders(from: &str, file: &str) -> usize {
+    let ups = from.rsplit(['/', '\\']).skip(1).filter(|s| !s.is_empty());
+    let downs = Path::new(file).ancestors().skip(1).filter_map(Path::file_name).map(|n| n.to_string_lossy());
+    ups.zip(downs).take_while(|(a, b)| a.chars().flat_map(char::to_lowercase).eq(b.chars().flat_map(char::to_lowercase))).count()
+}
+
+/// Which of the look-alikes `files` is the photo at `from`'s, by folder: the one file sharing
+/// the most folders with it ([`shared_folders`], at least one), when no other file shares as
+/// many and no missing photo of another path in `rivals` shares as many with that file. `None`
+/// when the folders don't tell — the photo is then ambiguous. Deciding from both sides makes the
+/// answer the same in any order the photos are looked at.
+fn folder_match<'a>(from: &str, files: &[&'a String], rivals: &[&FindCandidate]) -> Option<&'a String> {
+    let mut scored = files.iter().map(|f| (shared_folders(from, f), *f)).collect::<Vec<_>>();
+    scored.sort_by_key(|(n, _)| std::cmp::Reverse(*n));
+    let (best, file) = *scored.first()?;
+    let unique = scored.get(1).is_none_or(|(n, _)| *n < best);
+    let ours = rivals.iter().filter(|r| r.path != from).all(|r| shared_folders(&r.path, file) < best);
+    (best > 0 && unique && ours).then_some(file)
+}
+
 /// The file-system half of Find Missing Photos: which `candidates` are gone, and which file in
 /// `folder` (recursively) is each one's. Touches only the disk — never the session — so the app
 /// runs it on a worker thread (walking a big folder on a network share and hashing look-alikes
@@ -365,6 +389,10 @@ fn name_key(path: &str) -> String {
 /// 3. without a hash to confirm (or the file was edited in place): the one file with the same
 ///    name and size. Several such files are ambiguous: the photo is skipped and reported in
 ///    `ambiguous`, never guessed (two cameras' `IMG_0001.CR3` of one size are different photos).
+///    Unless the folders tell them apart ([`folder_match`]): a library moved to another drive
+///    keeps its folder names, so `…\100_0124\IMG_0001.JPG` is the look-alike under a
+///    `100_0124` folder, when that is the only one sharing the most folders with it and no other
+///    missing photo of that name shares as many with it.
 ///
 /// Files that are already some photo's original, or that another photo was just matched with,
 /// are not used.
@@ -394,15 +422,24 @@ pub fn plan_find_missing(candidates: &[FindCandidate], folder: &str) -> std::res
     let mut hash_of = |f: &str| hashes.entry(f.to_string()).or_insert_with(|| file_hash(f)).clone();
     let size_of = |f: &str| std::fs::metadata(f).map(|m| m.len()).ok();
     let mut used: HashSet<String> = HashSet::new();
+    // files taken by folder (step 3), and the path of the photo that took each: they stay
+    // look-alikes for the other photos of that name, so none is found by elimination
+    let mut by_folder: HashMap<String, String> = HashMap::new();
+    let mut lost_by_name: HashMap<String, Vec<&FindCandidate>> = HashMap::new();
+    for c in &lost {
+        lost_by_name.entry(name_key(&c.path)).or_default().push(c);
+    }
     let mut plan = FindPlan::default();
     for c in &lost {
         let name = name_key(&c.path);
         let size = c.size;
         let hash = c.hash.as_deref();
-        let named: Vec<&String> = by_name
+        // same name and size: the files still free, and those taken by folder (look-alikes, step 3)
+        let alike: Vec<&String> = by_name
             .get(&name)
-            .map(|v| v.iter().filter(|f| !used.contains(*f) && (size == 0 || size_of(f) == Some(size))).collect())
+            .map(|v| v.iter().filter(|f| (!used.contains(*f) || by_folder.contains_key(*f)) && (size == 0 || size_of(f) == Some(size))).collect())
             .unwrap_or_default();
+        let named: Vec<&String> = alike.iter().copied().filter(|f| !used.contains(*f)).collect();
         // 1. same name and size, confirmed by the content hash
         let mut hit: Option<(String, MatchBy)> =
             hash.and_then(|h| named.iter().find(|f| hash_of(f).as_deref() == Some(h))).map(|f| (f.to_string(), MatchBy::Name));
@@ -429,11 +466,23 @@ pub fn plan_find_missing(candidates: &[FindCandidate], folder: &str) -> std::res
             }
         }
         // 3. same name and size only (no hash, or the file was edited in place): one candidate
-        //    is taken, several are ambiguous and skipped rather than guessed
-        if hit.is_none() {
-            match named.as_slice() {
-                [one] => hit = Some(((*one).clone(), MatchBy::Name)),
-                [] => {}
+        //    is taken; several are told apart by folder, or are ambiguous and skipped rather
+        //    than guessed
+        if hit.is_none() && !named.is_empty() {
+            let rivals = lost_by_name.get(&name).map(Vec::as_slice).unwrap_or_default();
+            let pick = match alike.as_slice() {
+                [one] => Some((*one, false)),
+                _ => folder_match(&c.path, &alike, rivals).map(|f| (f, true)),
+            };
+            match pick {
+                Some((f, folder)) if !used.contains(f) => {
+                    if folder {
+                        by_folder.insert(f.clone(), c.path.clone());
+                    }
+                    hit = Some((f.clone(), MatchBy::Name));
+                }
+                // a virtual copy of a photo that was just found: its file is taken
+                Some((f, _)) if by_folder.get(f) == Some(&c.path) => continue,
                 _ => {
                     plan.ambiguous.push(AmbiguousFile { id: c.id, from: c.path.clone(), candidates: named.iter().map(|f| (*f).clone()).collect() });
                     continue;
@@ -515,7 +564,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Find Missing Photos",
             [],
             None,
-            "{folder} — relink every missing photo whose file is somewhere in the folder: same name and size (and content, when the library knows its hash), or — renamed — same size and content; or {found, missing, ambiguous} — relink what a search already found (the app searches on a worker thread; photos relinked meanwhile and files now in use are skipped) → {found: [{id, from, to, by: name|content}], missing, ambiguous: [{id, from, candidates}] (several same-name candidates and no hash to tell them apart: skipped)}",
+            "{folder} — relink every missing photo whose file is somewhere in the folder: same name and size (and content, when the library knows its hash), or — renamed — same size and content; or {found, missing, ambiguous} — relink what a search already found (the app searches on a worker thread; photos relinked meanwhile and files now in use are skipped) → {found: [{id, from, to, by: name|content}], missing, ambiguous: [{id, from, candidates}] (several same-name candidates, and no hash or folder to tell them apart: skipped)}",
             always,
             find_missing
         ),
