@@ -35,8 +35,14 @@ const MAX_FILES: usize = 2000;
 const MAX_PROFILE_COPY_BYTES: usize = 32 << 20;
 /// What one copied name costs besides its bytes: the `String` slot in its `Vec` and the allocator's header and rounding.
 const NAME_ALLOCATION: usize = std::mem::size_of::<String>() + 32;
-/// Largest radial error (half-diagonal units) accepted when converting a distortion to the DNG polynomial.
+/// Largest radial error (half-diagonal units) accepted when converting a distortion to the DNG polynomial, unless
+/// the distortion is strong enough for [`MAX_WARP_ERROR_SHARE`] to allow more.
 pub const MAX_WARP_ERROR: f64 = 0.001;
+/// Largest radial error accepted when converting a distortion, as a share of how far the distortion moves the image
+/// ([`model::displacement`], from the image at the centre's scale): the even DNG polynomial can't follow the odd terms
+/// of a strong wide-angle barrel within [`MAX_WARP_ERROR`], and such a lens would otherwise get no correction at the
+/// focal lengths that need it most (issue #4208).
+pub const MAX_WARP_ERROR_SHARE: f64 = 0.05;
 /// Largest relative error accepted when converting vignetting to the DNG polynomial.
 pub const MAX_VIGNETTE_ERROR: f64 = 0.01;
 
@@ -601,7 +607,7 @@ impl Profile {
                     d * self.tca_ratio(f, ch, rl * d)
                 };
                 let (k, err) = model::fit_even4(ratio)?;
-                (err <= MAX_WARP_ERROR).then_some([k[0], k[1], k[2], k[3], 0.0, 0.0])
+                (err <= MAX_WARP_ERROR || err <= MAX_WARP_ERROR_SHARE * model::displacement(ratio)).then_some([k[0], k[1], k[2], k[3], 0.0, 0.0])
             };
             if let (Some(r), Some(g), Some(b)) = (plane(0), plane(1), plane(2)) {
                 lens.warp = Some(EmbeddedWarp { planes: [r, g, b], center, radius });

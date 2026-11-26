@@ -224,6 +224,43 @@ fn crop_factor_scales_the_profile() {
     assert!((r(a) - rc).abs() > (r(b) - rc).abs() * 1.5, "{} {}", r(a) - rc, r(b) - rc);
 }
 
+/// A strong barrel whose odd PTLens terms the even DNG polynomial follows only to a few pixels (made-up
+/// coefficients shaped like a kit zoom's wide end, issue #4208) is still corrected, to within a twentieth of how far
+/// it moves the image. A weak distortion fitted as loosely is still left out.
+#[test]
+fn a_strong_distortion_is_corrected_even_when_the_fit_is_loose() {
+    let profile = |a: f64, b: f64, c: f64| {
+        let xml = format!(
+            r#"<lensdatabase><lens><maker>Testcam</maker><model>Testcam 18-55mm</model><cropfactor>1</cropfactor><calibration><distortion model="ptlens" focal="18" a="{a}" b="{b}" c="{c}"/></calibration></lens></lensdatabase>"#
+        );
+        LensDb::parse(&xml).unwrap().lenses.remove(0)
+    };
+    let (w, h) = (6000.0, 4000.0);
+    let strong = profile(0.08, -0.2, 0.15);
+    let wp = strong.correction(&shot(18.0)).expect("a strong barrel is corrected").warp.unwrap();
+    // in pixels, over a grid: how far the warp's source is from the model's, and how far the model's is from the
+    // undistorted one at the centre's scale, which is how far the distortion moves the image
+    let n = h / 2.0;
+    let k0 = strong.distortion_ratio(18.0, 0.0);
+    let (mut residual, mut uncorrected): (f64, f64) = (0.0, 0.0);
+    for gy in 0..=80 {
+        for gx in 0..=120 {
+            let (x, y) = (gx as f64 * w / 120.0, gy as f64 * h / 80.0);
+            let (sx, sy) = dng_source(&wp, 1, x, y, w, h);
+            let (dx, dy) = ((x - w / 2.0) / n, (y - h / 2.0) / n);
+            let k = strong.distortion_ratio(18.0, dx.hypot(dy));
+            let (ex, ey) = (w / 2.0 + dx * k * n, h / 2.0 + dy * k * n);
+            residual = residual.max((sx - ex).hypot(sy - ey));
+            uncorrected = uncorrected.max((dx.hypot(dy) * (k - k0) * n).abs());
+        }
+    }
+    assert!(residual > MAX_WARP_ERROR * w.hypot(h) / 2.0, "the fit is looser than the fixed limit: {residual} px");
+    assert!(residual * 20.0 < uncorrected, "{residual} px left of {uncorrected} px");
+
+    let weak = profile(0.05, -0.17, 0.15);
+    assert!(weak.correction(&shot(18.0)).is_none(), "a weak distortion the fit can't follow is left out");
+}
+
 #[test]
 fn fisheyes_get_no_rectilinear_warp_and_bad_shots_none() {
     let db = db();

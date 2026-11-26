@@ -53,6 +53,14 @@ only what was added, and with the mask's Invert it gave the whole photo. Such ma
 first component, on every process. It landed in place as a bug fix: intersecting with nothing is not
 a look anyone chose.
 
+**Lens database profiles at a strong wide-angle barrel** (issue #4208) are applied when the DNG warp's
+fit misses by more than 0.001 of the half diagonal but by at most 5 % of how far the distortion moves
+the image (`MAX_WARP_ERROR_SHARE`). Such a profile used to be refused, so at the wide end of a kit zoom
+the photo said "No lens profile found" and kept its whole barrel distortion. Photos with Enable Profile
+Corrections on at those focal lengths now get the profile's warp, on every process; photos that were
+already corrected keep the same warp. It landed in place as a bug fix: a missing correction for a
+calibrated lens is not a look anyone chose.
+
 **Lettering under Highlights and Shadows** (V8) no longer grows blocks of the wrong tone. V2's base
 is the edge-aware filter of a separable median alone. Dark lettering on a bright panel (a bus
 number, a sign) has strokes and gaps about as wide as the median's radius, so each row and column

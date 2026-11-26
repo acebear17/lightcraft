@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### Lens profiles correct strong wide-angle distortion
+- A lens profile from the lens database now corrects photos at focal lengths with strong barrel distortion that its
+  conversion can't follow exactly, such as the wide end of a kit zoom, where it said "No lens profile found" and left
+  the distortion in place (issue #4208). Photos with Enable Profile Corrections on at those focal lengths change. The
+  correction is used when what it leaves is at most a twentieth of how far the distortion moves the image; a weak
+  distortion the conversion can't follow closely is still left out.
+
 ### Heal meets its surroundings (process 14)
 - A healed spot is now pinned to the photo around its edge: on a gradient (a sky, a shaded wall, a cheek) it no
   longer leaves a faint disc or ring, and a dark line a few pixels or more beyond the spot's edge no longer smudges
