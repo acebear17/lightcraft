@@ -173,6 +173,20 @@ fn startup_failure_message_names_the_error_and_the_log() {
     assert!(!startup_failed_message("no adapter", None).1.contains("log file"));
 }
 
+/// The desktop app's window renderer notice (#4733) is built from `tr_format!` messages, so its
+/// sentences reach the catalogs and the gaps report instead of staying English.
+#[test]
+fn window_renderer_notice_reaches_the_translation_system() {
+    let formats = format_messages();
+    for message in [
+        "The window could not start with its {renderer} renderer last time.",
+        "The {renderer} renderer failed ({error}).",
+        "{reason} LightCraft now draws its window with {renderer}. To choose another, start LightCraft with {var}=dx12, vulkan, gl or glow (see docs/gpu-pipeline.md → Troubleshooting).",
+    ] {
+        assert!(formats.contains(message), "{message}");
+    }
+}
+
 #[test]
 fn locale_tags_normalize() {
     assert_eq!(Locale::parse_tag("en"), Some(Locale::En));
