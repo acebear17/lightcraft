@@ -641,6 +641,89 @@ fn find_missing_does_not_take_a_look_alike_for_a_file_name_with_a_backslash() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A library moved to a new drive, with `files` (path under the searched folder, bytes) and
+/// missing photos at `photos` as a Lightroom catalog lists originals it can't open: no size, no
+/// content hash. Runs Find Missing and gives each photo's path afterwards, and the result.
+fn find_missing_on_moved_drive(tag: &str, files: &[(&str, &[u8])], photos: &[&str]) -> (Vec<String>, serde_json::Value) {
+    use lightcraft_catalog::{Op, Photo, Source};
+    let dir = temp_dir(tag);
+    for (rel, bytes) in files {
+        let f = dir.join("found").join(rel);
+        std::fs::create_dir_all(f.parent().unwrap()).unwrap();
+        std::fs::write(f, bytes).unwrap();
+    }
+    let mut s = Session::new();
+    let ids: Vec<_> = photos
+        .iter()
+        .map(|path| {
+            let id = s.catalog.alloc_photo_id();
+            let p = Photo::new(id, Source::File { path: (*path).into() }, "x.jpg", "JPEG", 60, 40, "2026-01-01T10:00:00");
+            s.catalog.apply(Op::AddPhoto { photo: Box::new(p) }).unwrap();
+            id
+        })
+        .collect();
+    let r = s.execute("library.findMissing", &json!({"folder": dir.join("found").to_string_lossy()})).unwrap();
+    let found = dir.join("found").to_string_lossy().to_string();
+    let paths = ids
+        .iter()
+        .map(|id| match &s.catalog.photo(*id).unwrap().source {
+            Source::File { path } => path.strip_prefix(&found).map_or(path.clone(), |rel| rel.trim_start_matches(['/', '\\']).replace('\\', "/")),
+            _ => String::new(),
+        })
+        .collect();
+    let _ = std::fs::remove_dir_all(&dir);
+    (paths, r)
+}
+
+/// Issue #3626: every camera folder of an imported Lightroom library holds an `IMG_0001.JPG`,
+/// and the library knows neither their sizes nor their content. Find Missing tells them apart by
+/// the folders kept when the library moved to another drive, in whatever order it meets them.
+#[test]
+fn find_missing_tells_same_name_files_apart_by_folder() {
+    let files: &[(&str, &[u8])] =
+        &[("Pictures/100_0124/IMG_0001.JPG", b"a"), ("Pictures/100_0125/IMG_0001.JPG", b"bb"), ("Pictures/100_0126/IMG_0001.JPG", b"ccc")];
+    let photos = [r"E:\external 2\Pictures\100_0124\IMG_0001.JPG", r"E:\external 2\Pictures\100_0125\img_0001.jpg"];
+    let (paths, r) = find_missing_on_moved_drive("missing-folder", files, &photos);
+    assert_eq!(paths, ["Pictures/100_0124/IMG_0001.JPG", "Pictures/100_0125/IMG_0001.JPG"], "each by its folder: {r}");
+    assert_eq!((r["missing"].clone(), r["ambiguous"].as_array().map(Vec::len)), (json!(0), Some(0)), "{r}");
+    let (reversed, r) = find_missing_on_moved_drive("missing-folder-reversed", files, &[photos[1], photos[0]]);
+    assert_eq!(reversed, [paths[1].clone(), paths[0].clone()], "the same in the other order: {r}");
+}
+
+/// Folders tell look-alikes apart only when they do so unmistakably: two files under equally
+/// close folders, or two missing photos as close to one file, stay ambiguous; and a file taken by
+/// its folder doesn't leave its look-alike to a photo whose folders match neither.
+#[test]
+fn find_missing_does_not_guess_between_look_alikes_the_folders_do_not_tell_apart() {
+    let files: &[(&str, &[u8])] = &[
+        ("a/Trip/IMG_0001.JPG", b"x"),
+        ("b/Trip/IMG_0001.JPG", b"x"),
+        ("Day1/IMG_0002.JPG", b"x"),
+        ("Day2/IMG_0002.JPG", b"x"),
+        ("100_0124/IMG_0003.JPG", b"x"),
+        ("other/IMG_0003.JPG", b"x"),
+    ];
+    let photos = [
+        r"D:\Photos\Trip\IMG_0001.JPG",     // both files under a Trip folder
+        r"D:\x\Day1\IMG_0002.JPG",          // Day1 is the only one under a Day1 folder,
+        r"D:\y\Day1\IMG_0002.JPG",          // but so is this one
+        r"D:\Photos\100_0124\IMG_0003.JPG", // its folder, unmistakably
+        r"D:\Photos\100_0999\IMG_0003.JPG", // not other/ by elimination
+        r"D:\Photos\100_0124\IMG_0003.JPG", // a virtual copy: the file is taken, nothing to report
+    ];
+    for (tag, order) in [("missing-tie", [0, 1, 2, 3, 4, 5]), ("missing-tie-reversed", [5, 4, 3, 2, 1, 0])] {
+        let (paths, r) = find_missing_on_moved_drive(tag, files, &order.map(|i| photos[i]));
+        let path = |i: usize| paths[order.iter().position(|&o| o == i).unwrap()].as_str();
+        let mut pair = [path(3), path(5)];
+        pair.sort_unstable();
+        assert_eq!(pair, ["100_0124/IMG_0003.JPG", photos[3]], "{tag}: by its folder, once: {r}");
+        for i in [0, 1, 2, 4] {
+            assert_eq!(path(i), photos[i], "{tag}: not guessed: {r}");
+        }
+        assert_eq!(r["ambiguous"].as_array().map(Vec::len), Some(4), "{tag}: {r}");
+    }
+}
+
 #[test]
 fn missing_files_are_found_and_relinked() {
     let dir = std::env::temp_dir().join(format!("lc-missing-{}", std::process::id()));
