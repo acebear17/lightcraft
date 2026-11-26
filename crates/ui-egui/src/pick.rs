@@ -155,7 +155,7 @@ pub fn poll(app: &mut LightcraftApp, ctx: &egui::Context) {
         match app.run(&p.command, params) {
             Ok(r) => {
                 if let Some(text) = answered_message(&p.command, &r) {
-                    app.toast(ctx, text);
+                    app.toast_with_warnings(text, &r);
                 }
             }
             Err(e) => app.toast_error(ctx, e),

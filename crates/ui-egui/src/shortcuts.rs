@@ -590,8 +590,11 @@ fn fire_command(app: &mut LightcraftApp, ctx: &egui::Context, f: &str, rotate_fi
         up_down_key(app, ctx, f);
         return;
     }
+    let r = app.run(f, json!({}));
+    // an undo or redo that left files behind has already toasted which ones; don't replace it
+    let warned = r.as_ref().is_ok_and(|v| v.get("warnings").is_some());
     // an export that can't start (e.g. no folder) says why instead of doing nothing
-    if let Err(e) = app.run(f, json!({}))
+    if let Err(e) = r
         && matches!(f, "app.export" | "app.exportPrevious")
     {
         app.toast(ctx, e);
@@ -600,6 +603,7 @@ fn fire_command(app: &mut LightcraftApp, ctx: &egui::Context, f: &str, rotate_fi
         "photo.pick" => flag_toast(app, ctx, lightcraft_catalog::Flag::Pick),
         "photo.reject" => flag_toast(app, ctx, lightcraft_catalog::Flag::Reject),
         "photo.unflag" => flag_toast(app, ctx, lightcraft_catalog::Flag::None),
+        "edit.undo" | "edit.redo" if warned => {}
         "edit.undo" => app.toast(ctx, crate::i18n::tr("Undo")),
         "edit.redo" => app.toast(ctx, crate::i18n::tr("Redo")),
         _ => {}

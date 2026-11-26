@@ -601,10 +601,13 @@ fn move_folder_item(app: &mut LightcraftApp, ui: &mut egui::Ui, path: &str) {
     if let crate::pick::Picked::Now(v) = picked
         && let Some(into) = v.into_iter().next()
     {
-        let said = app.run("folder.move", json!({"path": path, "into": into})).map(|r| crate::pick::answered_message("folder.move", &r));
-        match said {
-            Ok(Some(text)) | Err(text) => app.toast(ui.ctx(), text),
-            Ok(None) => {}
+        match app.run("folder.move", json!({"path": path, "into": into})) {
+            Ok(r) => {
+                if let Some(text) = crate::pick::answered_message("folder.move", &r) {
+                    app.toast_with_warnings(text, &r);
+                }
+            }
+            Err(e) => app.toast(ui.ctx(), e),
         }
     }
     ui.close();

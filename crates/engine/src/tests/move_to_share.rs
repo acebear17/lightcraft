@@ -11,6 +11,8 @@
 //!   so every photo points at its file and the step can run once the share answers.
 //! * Across devices (a share is another volume): the file is copied, checked and only then
 //!   removed; the copy goes to a hidden name and takes the photo's name only once complete.
+//! * A folder moved across devices (`folder.move`): the same, for everything in it; anything
+//!   that isn't a plain file or folder refuses the move before anything is copied.
 
 use lightcraft_catalog::{Op, Photo, PhotoId, Source};
 use serde_json::json;
@@ -230,6 +232,103 @@ fn a_move_across_devices_copies_checks_and_removes_and_undoes_the_same_way() {
     assert!(gone_from_share, "no copy left on the other device");
 }
 
+/// Issue #4650: a folder moved to another volume, where a rename can't go, is copied whole
+/// (subfolders, sidecars, hidden files, empty folders, file dates), checked, and only then
+/// removed; Undo brings it back the same way.
+#[test]
+fn a_folder_moved_across_devices_is_copied_whole_then_removed_and_undoes() {
+    let dir = Scratch::new("folder-devices");
+    let Some(other) = other_device(&dir.0) else {
+        lightcraft_testkit::skip!(System, "no second writable file system (/dev/shm) to move a folder to");
+        return;
+    };
+    let share = Scratch(other.join(format!("lc-folder-other-{}", std::process::id())));
+    let _ = std::fs::remove_dir_all(&share.0);
+    std::fs::create_dir_all(&share.0).unwrap();
+    let (trip, moved) = (dir.0.join("local/trip"), share.0.join("trip"));
+    std::fs::create_dir_all(trip.join("day2")).unwrap();
+    std::fs::create_dir_all(trip.join("empty")).unwrap();
+    let mut s = Session::new();
+    let body: String = (0..300_000).map(|i| char::from(b'a' + (i % 26) as u8)).collect();
+    let a = add_file(&mut s, &dir.path("local/trip/a.jpg"), &body);
+    let b = add_file(&mut s, &dir.path("local/trip/day2/b.jpg"), "B");
+    std::fs::write(trip.join("a.xmp"), "<edits/>").unwrap();
+    std::fs::write(trip.join(".hidden"), "h").unwrap();
+    // a sidecar's date says whether it changed since import: the copy keeps it
+    let old = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_600_000_000);
+    std::fs::File::options().write(true).open(trip.join("a.xmp")).unwrap().set_modified(old).unwrap();
+
+    let r = s.execute("folder.move", &json!({"path": trip.to_string_lossy(), "into": share.0.to_string_lossy()})).unwrap();
+    assert_eq!(r["relinked"], 2, "{r}");
+    assert!(!trip.exists(), "the original folder is gone once the copy is checked");
+    assert_eq!(std::fs::read_to_string(moved.join("a.jpg")).unwrap(), body);
+    assert_eq!(std::fs::read_to_string(moved.join("day2/b.jpg")).unwrap(), "B");
+    assert_eq!(std::fs::read_to_string(moved.join("a.xmp")).unwrap(), "<edits/>");
+    assert_eq!(std::fs::read_to_string(moved.join(".hidden")).unwrap(), "h");
+    assert!(moved.join("empty").is_dir(), "an empty folder goes along");
+    assert_eq!(std::fs::metadata(moved.join("a.xmp")).unwrap().modified().unwrap(), old, "the file date is kept");
+    let names: Vec<_> = std::fs::read_dir(&moved).unwrap().flatten().map(|e| e.file_name().to_string_lossy().to_string()).collect();
+    assert!(!names.iter().any(|n| n.contains("lc-partial")), "no partial copy left: {names:?}");
+    assert!(file_of(&s, a).starts_with(&moved.to_string_lossy().to_string()) && file_of(&s, b).ends_with("day2/b.jpg"));
+
+    s.execute("edit.undo", &json!({})).unwrap();
+    assert!(!moved.exists(), "Undo leaves no copy on the other device");
+    assert_eq!(std::fs::read_to_string(trip.join("a.jpg")).unwrap(), body);
+    assert_eq!(std::fs::read_to_string(trip.join("day2/b.jpg")).unwrap(), "B");
+    assert!(trip.join("empty").is_dir());
+    assert_eq!(file_of(&s, a), dir.path("local/trip/a.jpg"));
+}
+
+/// Files the old place won't give up after a complete, checked copy to another volume: the move
+/// stands (the photos follow the copy), and `folder.move` and `edit.undo` name each file left
+/// behind in `warnings` instead of reporting a clean move.
+#[cfg(unix)]
+#[test]
+fn a_folder_move_that_leaves_files_behind_names_them() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = Scratch::new("folder-left-behind");
+    let Some(other) = other_device(&dir.0) else {
+        lightcraft_testkit::skip!(System, "no second writable file system (/dev/shm) to move a folder to");
+        return;
+    };
+    let share = Scratch(other.join(format!("lc-folder-left-{}", std::process::id())));
+    let _ = std::fs::remove_dir_all(&share.0);
+    std::fs::create_dir_all(&share.0).unwrap();
+    let (trip, moved) = (dir.0.join("local/trip"), share.0.join("trip"));
+    std::fs::create_dir_all(trip.join("day2")).unwrap();
+    let mut s = Session::new();
+    // a file outside the read-only folder goes first, so the removal is already under way
+    let a = add_file(&mut s, &dir.path("local/trip/a.jpg"), "A");
+    let b = add_file(&mut s, &dir.path("local/trip/day2/b.jpg"), "B");
+    let lock = |p: &std::path::Path, mode| std::fs::set_permissions(p, std::fs::Permissions::from_mode(mode)).unwrap();
+    lock(&trip.join("day2"), 0o555);
+    if std::fs::write(trip.join("day2/.probe"), b"x").is_ok() {
+        lock(&trip.join("day2"), 0o755);
+        lightcraft_testkit::skip!(System, "running with rights that ignore a read-only folder");
+        return;
+    }
+    let r = s.execute("folder.move", &json!({"path": trip.to_string_lossy(), "into": share.0.to_string_lossy()}));
+    lock(&trip.join("day2"), 0o755);
+    let r = r.unwrap();
+    let warned = |r: &serde_json::Value, file: &std::path::Path| {
+        r["warnings"].as_array().is_some_and(|w| w.iter().any(|w| w.as_str().is_some_and(|w| w.contains(&*file.to_string_lossy()))))
+    };
+    assert!(warned(&r, &trip.join("day2/b.jpg")), "the file left behind is named: {r}");
+    assert!(!trip.join("a.jpg").exists(), "what could be removed was");
+    assert_eq!(std::fs::read_to_string(moved.join("day2/b.jpg")).unwrap(), "B", "the copy is whole");
+    assert!(file_of(&s, a).starts_with(&*moved.to_string_lossy()) && file_of(&s, b).starts_with(&*moved.to_string_lossy()));
+
+    // once the old place is cleared, Undo moves the folder back; this time the copy's side holds on
+    std::fs::remove_dir_all(&trip).unwrap();
+    lock(&moved.join("day2"), 0o555);
+    let r = s.execute("edit.undo", &json!({}));
+    lock(&moved.join("day2"), 0o755);
+    let r = r.unwrap();
+    assert!(warned(&r, &moved.join("day2/b.jpg")), "Undo names the file left behind too: {r}");
+    assert_eq!(std::fs::read_to_string(trip.join("day2/b.jpg")).unwrap(), "B");
+    assert_eq!(file_of(&s, b), dir.path("local/trip/day2/b.jpg"));
+}
+
 /// A writable folder on another device than `here`, if there is one.
 fn other_device(here: &std::path::Path) -> Option<std::path::PathBuf> {
     #[cfg(unix)]
@@ -296,4 +395,43 @@ fn the_copy_across_volumes_is_whole_or_absent_and_never_replaces() {
     std::fs::write(&to, b"other").unwrap();
     assert!(crate::rename::RealFs.copy_no_replace(&from, &to).is_err());
     assert_eq!(std::fs::read(&to).unwrap(), b"other");
+}
+
+/// A folder copied to another volume with a link inside would copy the link's target as a new,
+/// readable file: the move is refused before anything is copied, and the folder stays whole.
+#[cfg(unix)]
+#[test]
+fn a_folder_with_a_link_inside_is_not_copied_across_volumes() {
+    let dir = Scratch::new("folder-link");
+    std::fs::create_dir_all(dir.0.join("local/trip/day2")).unwrap();
+    std::fs::write(dir.0.join("local/trip/a.jpg"), b"A").unwrap();
+    std::fs::write(dir.0.join("local/private.txt"), b"secret").unwrap();
+    std::os::unix::fs::symlink(dir.0.join("local/private.txt"), dir.0.join("local/trip/day2/b.xmp")).unwrap();
+    let e = crate::rename::move_folder_across_volumes(&dir.0.join("local/trip"), &dir.0.join("share/trip")).unwrap_err();
+    assert!(e.to_string().contains("b.xmp"), "names what refused it: {e}");
+    assert!(!dir.0.join("share/trip").exists(), "nothing copied");
+    assert!(dir.0.join("local/trip/a.jpg").is_file() && dir.0.join("local/trip/day2/b.xmp").is_symlink());
+}
+
+/// Originals that can't be removed (a read-only volume) leave the folder where it was, with no
+/// second copy on the other side.
+#[cfg(unix)]
+#[test]
+fn a_folder_that_cannot_be_removed_after_copying_stays_and_the_copy_goes() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = Scratch::new("folder-readonly");
+    let trip = dir.0.join("local/trip");
+    std::fs::create_dir_all(&trip).unwrap();
+    std::fs::write(trip.join("a.jpg"), b"A").unwrap();
+    std::fs::set_permissions(&trip, std::fs::Permissions::from_mode(0o555)).unwrap();
+    if std::fs::write(trip.join(".probe"), b"x").is_ok() {
+        std::fs::set_permissions(&trip, std::fs::Permissions::from_mode(0o755)).unwrap();
+        lightcraft_testkit::skip!(System, "running with rights that ignore a read-only folder");
+        return;
+    }
+    let r = crate::rename::move_folder_across_volumes(&trip, &dir.0.join("share/trip"));
+    std::fs::set_permissions(&trip, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(r.is_err(), "{r:?}");
+    assert_eq!(std::fs::read(trip.join("a.jpg")).unwrap(), b"A");
+    assert!(!dir.0.join("share/trip").exists(), "the copy is removed");
 }

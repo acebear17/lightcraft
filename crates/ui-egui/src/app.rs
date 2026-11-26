@@ -287,6 +287,13 @@ impl LightcraftApp {
                 self.ui.toast = Some((message, now + TOAST_SECONDS, None));
             }
         }
+        if let Ok(result) = &r
+            && matches!(id, "edit.undo" | "edit.redo")
+            && result.get("warnings").is_some()
+        {
+            // a folder moved back across volumes left files behind: say which, from every menu and key
+            self.toast_with_warnings(i18n::tr(if id == "edit.undo" { "Undo" } else { "Redo" }), result);
+        }
         if r.is_ok() && matches!(id, "photo.label" | "photo.clearLabel") {
             // Clear Color Label takes no colour: whatever `label` it is given, the photo's label is cleared
             let label = params.get("label").and_then(Value::as_str).and_then(lightcraft_catalog::ColorLabel::parse).filter(|_| id == "photo.label");
@@ -483,6 +490,21 @@ impl LightcraftApp {
 
     pub fn toast(&mut self, ctx: &egui::Context, text: impl Into<String>) {
         self.toast_for(ctx, text, TOAST_SECONDS);
+    }
+
+    /// A toast of `text` followed by what a command's `result` warns about (its `warnings`, the first
+    /// few and how many more, so the toast fits the canvas), staying long enough to read them.
+    pub fn toast_with_warnings(&mut self, text: impl Into<String>, result: &Value) {
+        const SHOWN: usize = 3;
+        let warnings: Vec<&str> = result.get("warnings").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str).collect();
+        let mut parts: Vec<String> = std::iter::once(text.into()).chain(warnings.iter().take(SHOWN).map(|w| w.to_string())).collect();
+        if warnings.len() > SHOWN {
+            parts.push(i18n::tr_format!("+{} more", warnings.len() - SHOWN));
+        }
+        let secs = if warnings.is_empty() { TOAST_SECONDS } else { 6.0 };
+        let text = parts.join(" · ");
+        let t = self.tick_now();
+        self.ui.toast = Some((text, t + secs, None));
     }
 
     /// Auto straighten (the crop panel's Auto, a double-click with the Straighten tool), saying so

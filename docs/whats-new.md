@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### Move Folder To… another drive
+- Move Folder To… now moves a folder onto another drive, an external disk or a NAS (issue #4650). It used to fail with
+  "cannot move the file to a different disk drive" (Windows) or "Cross-device link" (macOS). The folder is copied with
+  everything in it, each file is checked against its original and keeps its date, and the originals are removed only
+  then; if anything goes wrong first, the folder stays where it was. A folder holding a link refuses the move. Undo
+  moves it back the same way. Files that can't be removed from the old place afterwards are named in the message.
+
 ### Heal meets its surroundings (process 14)
 - A healed spot is now pinned to the photo around its edge: on a gradient (a sky, a shaded wall, a cheek) it no
   longer leaves a faint disc or ring, and a dark line a few pixels or more beyond the spot's edge no longer smudges

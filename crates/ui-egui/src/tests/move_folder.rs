@@ -209,3 +209,43 @@ fn move_folder_to_waits_for_open_library_to_finish() {
     assert_eq!(asked.lock().unwrap().len(), 2, "the destination is asked for");
     assert!(h.app.pending_picks.iter().any(|p| p.command == "folder.move"));
 }
+
+/// Issue #4650: Cmd+Z that moves a folder back from another volume but can't remove a file there
+/// keeps the toast that names the file; the key's own "Undo" toast must not replace it.
+#[cfg(unix)]
+#[test]
+fn undo_by_key_keeps_the_toast_naming_files_left_behind() {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    let dir = Scratch::new("undo-left-behind");
+    let dev = |p: &std::path::Path| std::fs::metadata(p).map(|m| m.dev()).ok();
+    let Some(shm) = Some(std::path::Path::new("/dev/shm")).filter(|p| dev(p).is_some_and(|d| Some(d) != dev(&dir.0))) else {
+        lightcraft_testkit::skip!(System, "no second file system (/dev/shm) to move a folder to");
+        return;
+    };
+    let share = Scratch(shm.join(format!("lc-ui-undo-left-{}", std::process::id())));
+    let _ = std::fs::remove_dir_all(&share.0);
+    if std::fs::create_dir_all(&share.0).is_err() {
+        lightcraft_testkit::skip!(System, "/dev/shm is not writable");
+        return;
+    }
+    write_png(&dir.path("trip/day2/b.png"), 2);
+    let (mut h, _, _) = app_with_trip(&dir);
+    let r = h.app.run("folder.move", json!({"path": dir.path("trip"), "into": share.0.to_string_lossy()})).unwrap();
+    assert!(r.get("warnings").is_none(), "a clean move: {r}");
+    let held = share.0.join("trip/day2");
+    let lock = |mode| std::fs::set_permissions(&held, std::fs::Permissions::from_mode(mode)).unwrap();
+    lock(0o555);
+    if std::fs::write(held.join(".probe"), b"x").is_ok() {
+        lock(0o755);
+        lightcraft_testkit::skip!(System, "running with rights that ignore a read-only folder");
+        return;
+    }
+    let r = h.request("ui.key", json!({"key": "z", "cmd": true}), T);
+    h.step();
+    h.step();
+    lock(0o755);
+    assert_eq!(r["ok"], true, "{r}");
+    assert!(std::path::Path::new(&dir.path("trip/day2/b.png")).exists(), "Undo moved the folder back");
+    let toast = h.app.ui.toast.as_ref().map(|t| t.0.clone()).unwrap_or_default();
+    assert!(toast.contains("b.png"), "the toast names the file left behind: {toast:?}");
+}

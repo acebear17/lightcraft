@@ -213,6 +213,77 @@ fn move_across_volumes(fs: &RealFs, a: &Path, b: &Path) -> std::io::Result<()> {
     })
 }
 
+/// Move the folder `a` to `b` on another volume, where a rename can't go: everything in it is
+/// copied into a new folder `b` (never merged into one that exists), each file checked byte for
+/// byte against its original and given its date, and only then are the originals removed —
+/// exactly the files and folders that were copied. A link or special file anywhere inside refuses
+/// the move before anything is copied (its target would be copied as a new, readable file). Any
+/// failure before the originals go removes the copy and leaves `a` as it was. Returns what could
+/// not be removed from `a` once the copy was complete (each with why): the move stands.
+pub(crate) fn move_folder_across_volumes(a: &Path, b: &Path) -> std::io::Result<Vec<String>> {
+    if !std::fs::symlink_metadata(a)?.is_dir() {
+        return Err(std::io::Error::other(format!("{} is not a folder", a.display())));
+    }
+    // folders (each before what is inside it) and files, relative to `a`
+    let (mut dirs, mut files) = (Vec::new(), Vec::new());
+    let mut pending = vec![PathBuf::new()];
+    while let Some(rel) = pending.pop() {
+        for entry in std::fs::read_dir(a.join(&rel))? {
+            let entry = entry?;
+            let (kind, rel) = (entry.file_type()?, rel.join(entry.file_name()));
+            if kind.is_dir() {
+                dirs.push(rel.clone());
+                pending.push(rel);
+            } else if kind.is_file() {
+                files.push(rel);
+            } else {
+                return Err(std::io::Error::other(format!(
+                    "{} is a link or special file, not a plain file or folder; nothing was moved",
+                    a.join(&rel).display()
+                )));
+            }
+        }
+    }
+    std::fs::create_dir(b)?;
+    let copied = (|| {
+        for d in &dirs {
+            std::fs::create_dir(b.join(d))?;
+        }
+        for f in &files {
+            let (from, to) = (a.join(f), b.join(f));
+            RealFs.copy_no_replace(&from, &to)?;
+            if !same_contents(&from, &to)? {
+                return Err(std::io::Error::other(format!("the copy at {} did not match the original", to.display())));
+            }
+            // a sidecar's date tells whether it changed since import
+            let when = std::fs::metadata(&from)?.modified()?;
+            std::fs::OpenOptions::new().write(true).open(&to)?.set_modified(when)?;
+        }
+        Ok(())
+    })();
+    let keep_original = |e: std::io::Error| {
+        let copy = match std::fs::remove_dir_all(b) {
+            Ok(()) => String::new(),
+            Err(r) => format!("; the incomplete copy at {} could not be removed ({r})", b.display()),
+        };
+        std::io::Error::new(e.kind(), format!("{e}; the folder was kept where it was{copy}"))
+    };
+    copied.map_err(keep_original)?;
+    // innermost first, the folder itself last
+    let folders = dirs.iter().rev().map(|d| (a.join(d), true)).chain(std::iter::once((a.to_path_buf(), true)));
+    let mut left = Vec::new();
+    for (i, (path, is_dir)) in files.iter().map(|f| (a.join(f), false)).chain(folders).enumerate() {
+        let gone = if is_dir { std::fs::remove_dir(&path) } else { std::fs::remove_file(&path) };
+        match gone {
+            Ok(()) => {}
+            // nothing removed yet (a read-only volume): drop the copy so the folder isn't in two places
+            Err(e) if i == 0 => return Err(keep_original(e)),
+            Err(e) => left.push(format!("{} could not be removed from the old place ({e})", path.display())),
+        }
+    }
+    Ok(left)
+}
+
 /// Whether files `a` and `b` hold the same bytes: lengths first, then 1 MiB chunks at a time, so
 /// a large raw or video is never read into memory whole.
 pub(super) fn same_contents(a: &Path, b: &Path) -> std::io::Result<bool> {
