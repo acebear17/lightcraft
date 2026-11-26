@@ -324,6 +324,28 @@ pub fn startup_failed_message(error: &str, log_file: Option<&str>) -> (String, S
     (tr("LightCraft could not start").to_string(), text)
 }
 
+/// The desktop app's notice about its window renderer (#4733), in the UI language: why it changed
+/// (`reason`, from [`window_renderer_died`] and [`window_renderer_failed`]), the renderer it now
+/// uses and how to choose another.
+pub fn window_renderer_notice(reason: &str, renderer: &str) -> String {
+    tr_format!(
+        "{reason} LightCraft now draws its window with {renderer}. To choose another, start LightCraft with {var}=dx12, vulkan, gl or glow (see docs/gpu-pipeline.md → Troubleshooting).",
+        reason = reason,
+        renderer = renderer,
+        var = "LIGHTCRAFT_GPU_BACKEND"
+    )
+}
+
+/// Why the window renderer changed: the last start died while it used `renderer`.
+pub fn window_renderer_died(renderer: &str) -> String {
+    tr_format!("The window could not start with its {renderer} renderer last time.", renderer = renderer)
+}
+
+/// Why the window renderer changed: `renderer` failed its probe with wgpu's `error`.
+pub fn window_renderer_failed(renderer: &str, error: &str) -> String {
+    tr_format!("The {renderer} renderer failed ({error}).", renderer = renderer, error = error)
+}
+
 /// The title and text of the message box shown when LightCraft stopped while its window was up
 /// (issue #1337: the window's renderer after the graphics driver reset the GPU), in the UI
 /// language: what happened and, when there is one, the log file to look in.

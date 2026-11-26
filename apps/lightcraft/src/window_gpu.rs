@@ -15,6 +15,7 @@
 use eframe::egui_wgpu::{WgpuConfiguration, WgpuSetup, WgpuSetupExisting};
 use eframe::wgpu;
 use lightcraft_engine::gpu::backend::{self, Backends, WindowRenderer};
+use lightcraft_ui_egui::i18n;
 use std::path::PathBuf;
 
 /// Environment variable counting automatic relaunches after a failed start (bounds the chain).
@@ -131,19 +132,11 @@ pub fn choose(files: &Files, compose_window: bool) -> Chosen {
 /// silently (it is logged, and the one that worked is remembered): the app works, so a pop-up with
 /// wgpu's error only alarms (#1624). Shown: the last start died, or the forced renderer failed.
 fn user_notice(failed: Option<WindowRenderer>, forced: Option<WindowRenderer>, problems: &[String], which: WindowRenderer) -> Option<String> {
-    let mut notice = failed.map(|f| format!("The window could not start with its {} renderer last time.", f.name()));
+    let mut notice = failed.map(|f| i18n::window_renderer_died(f.name()));
     if forced.is_some() && !problems.is_empty() {
         notice = Some(format!("{} {}", notice.unwrap_or_default(), problems.join(" ")).trim().to_string());
     }
-    notice.map(|n| {
-        format!(
-            "{n} {app} now draws its window with {}. To choose another, start {app} with {var}=dx12, vulkan, gl or glow \
-             (see docs/gpu-pipeline.md → Troubleshooting).",
-            which.name(),
-            app = "LightCraft",
-            var = "LIGHTCRAFT_GPU_BACKEND",
-        )
-    })
+    notice.map(|n| i18n::window_renderer_notice(&n, which.name()))
 }
 
 /// eframe's defaults with the app's backends and DX12 shader compiler (issues #136, #471).
@@ -192,7 +185,7 @@ fn pick_probed(
                     Ok(e) => return Some((r, Some(e))),
                     Err(e) => {
                         log::error!("window: the {} renderer failed: {e}", r.name());
-                        problems.push(format!("The {} renderer failed ({e}).", r.name()));
+                        problems.push(i18n::window_renderer_failed(r.name(), &e));
                     }
                 }
             }
