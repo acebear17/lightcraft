@@ -58,7 +58,8 @@ Warp: a separable stretch of the smoothed valid-area edges to the canvas edges. 
 largest rectangle of image data (set as the develop crop, so it stays adjustable). Fill Edges:
 push–pull diffusion. Output: 16-bit integer DNG (16-bit float for HDR panoramas).
 
-**DNG output** (`output.rs`): LinearRaw, 3 samples, Deflate tiles; values scaled below 1.0 with the
+**DNG output** (`output.rs`): LinearRaw, 3 samples; Deflate tiles for float samples, lossless JPEG tiles for
+16-bit integer ones (several other raw readers refuse Deflate on integer data); values scaled below 1.0 with the
 scale in `BaselineExposure`; raw sources keep their DNG colour tags (camera RGB), other sources get
 `ColorMatrix1`/`ForwardMatrix1` of their RGB space.
 

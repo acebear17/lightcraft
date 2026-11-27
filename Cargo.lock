@@ -4230,6 +4230,7 @@ dependencies = [
 name = "lightcraft-merge"
 version = "0.21.1"
 dependencies = [
+ "craft-tiff",
  "lightcraft-codecs",
  "lightcraft-color",
  "lightcraft-geom",
