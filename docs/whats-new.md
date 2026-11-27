@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Panorama DNGs use lossless JPEG
+- Photo Merge ▸ Panorama now stores its 16-bit DNG as lossless JPEG, the usual compression for integer raw data,
+  instead of Deflate, which several other raw readers reject on integer data (issue #4838). The pixels are the same,
+  and LightCraft still opens panoramas you already made. HDR merges and HDR panoramas (16-bit float) are unchanged.
+
 ### Heal meets its surroundings (process 14)
 - A healed spot is now pinned to the photo around its edge: on a gradient (a sky, a shaded wall, a cheek) it no
   longer leaves a faint disc or ring, and a dark line a few pixels or more beyond the spot's edge no longer smudges

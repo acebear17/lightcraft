@@ -28,7 +28,7 @@ pub enum DngSamples {
     Half,
     /// 32-bit floating point, Deflate + floating-point predictor.
     Float,
-    /// 16-bit integer, Deflate + horizontal predictor (panoramas of normal-range photos).
+    /// 16-bit integer, lossless JPEG (panoramas of normal-range photos).
     U16,
 }
 
@@ -117,7 +117,13 @@ pub fn write_linear_dng(
         metadata: meta,
         lens_metadata: Default::default(),
     };
-    let compression = DngCompression::Deflate { tile: 256, half: samples == DngSamples::Half };
+    // Integer samples get lossless JPEG, the usual DNG compression for them: several raw readers take Deflate tiles
+    // only as floats.
+    let compression = match samples {
+        DngSamples::Half => DngCompression::Deflate { tile: 256, half: true },
+        DngSamples::Float => DngCompression::Deflate { tile: 256, half: false },
+        DngSamples::U16 => DngCompression::Lj92 { tile: 256 },
+    };
     lightcraft_raw::write_dng(&raw, &DngWriteOptions { compression, ..Default::default() }).map_err(|e| MergeError::Output(e.to_string()))
 }
 
@@ -154,5 +160,22 @@ mod tests {
         }
         let u16 = write_linear_dng(&img, &color, Orientation::Normal, &Metadata::default(), 0.0, DngSamples::U16, &[]).unwrap();
         assert!(lightcraft_raw::decode(&u16).is_ok());
+    }
+
+    /// Integer samples stay off Deflate, which several raw readers accept only for floats (#4838), and still store
+    /// every value exactly: a width that isn't a whole number of tiles, black next to the brightest value.
+    #[test]
+    fn integer_samples_are_not_deflated_and_round_trip_exactly() {
+        use craft_tiff::tags::{COMPRESSION, compression::ADOBE_DEFLATE};
+        let img = Rgb32f::from_fn(300, 20, |x, y| if (x + y) % 2 == 0 { [0.0; 3] } else { [0.95, x as f32 / 400.0, y as f32 / 25.0] });
+        let color = FrameColor::Linear { to_xyz_d50: bradford(D65, D50).mul(&lightcraft_color::SRGB.to_xyz()) };
+        let write = |samples| write_linear_dng(&img, &color, Orientation::Normal, &Metadata::default(), 0.0, samples, &[]).unwrap();
+        let compression = |bytes: &[u8]| craft_tiff::Tiff::parse(bytes).unwrap().ifds[0].u16(COMPRESSION);
+        let (int, half) = (write(DngSamples::U16), write(DngSamples::Half));
+        assert_ne!(compression(&int), Some(ADOBE_DEFLATE));
+        assert_eq!(compression(&half), Some(ADOBE_DEFLATE));
+        let want: Vec<u16> = img.data.iter().flat_map(|p| p.map(|v| (v * 65535.0).round() as u16)).collect();
+        let RawData::U16(got) = lightcraft_raw::decode(&int).unwrap().data else { panic!("not integer samples") };
+        assert!(got == want, "integer samples changed in the round trip");
     }
 }
