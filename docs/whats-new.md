@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Phone portraits with a depth map open
+- JPEG portraits that carry a large depth map in their metadata (Motorola Portrait mode, and other phones that store
+  it as Extended XMP) now open and develop. They were refused with "too many APP1 markers", because the map is split
+  over hundreds of metadata segments (issue #4815). A file with hundreds of other metadata segments is still refused.
+
 ### Heal meets its surroundings (process 14)
 - A healed spot is now pinned to the photo around its edge: on a gradient (a sky, a shaded wall, a cheek) it no
   longer leaves a faint disc or ring, and a dark line a few pixels or more beyond the spot's edge no longer smudges

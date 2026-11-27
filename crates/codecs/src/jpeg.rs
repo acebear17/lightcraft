@@ -3,6 +3,7 @@
 
 use crate::convert::{Buf, Meta, Model, Raw, check_size, finish};
 use crate::{DecodeOptions, Decoded, Error, Format, Result, Thumbnail, ThumbnailSource, exif};
+use craft_image_codecs::jpeg_probe::{JpegVisit, walk_jpeg_segments};
 use craft_image_codecs::jpeg_sef::{reaches_eoi, repair as without_sef_trailer};
 
 const F: Format = Format::Jpeg;
@@ -17,7 +18,32 @@ pub(crate) fn decode(bytes: &[u8], opts: &DecodeOptions) -> Result<Decoded> {
     decode_with_fallback(bytes, opts, None)
 }
 
+/// Most APP1 segments, Extended XMP aside, a JPEG may have before it is refused.
 const MAX_APP1: u32 = 128;
+
+/// Signature of an Extended XMP APP1 segment (Adobe XMP Specification Part 3, 1.1.3.1).
+const EXTENDED_XMP: &[u8] = b"http://ns.adobe.com/xmp/extension/\0";
+
+/// Refuse a JPEG with more than `MAX_APP1` APP1 segments, so the decoders' second walk over the
+/// markers stays linear in file size. Extended XMP segments aren't counted: craft-image-codecs
+/// removes them before zune-jpeg parses the stream, and craft-jpeg skips every APPn segment.
+/// They are only counted when the total is over the cap.
+fn check_app1(bytes: &[u8], m: &Markers) -> Result<()> {
+    if m.app1 <= MAX_APP1 {
+        return Ok(());
+    }
+    let mut extended = 0u32;
+    let walked = walk_jpeg_segments(bytes, |marker, _, payload| {
+        if marker == 0xE1 && payload.starts_with(EXTENDED_XMP) {
+            extended = extended.saturating_add(1);
+        }
+        Ok(JpegVisit::Continue)
+    });
+    if walked.is_err() || m.app1.saturating_sub(extended) > MAX_APP1 {
+        return Err(Error::Malformed(F, "too many APP1 markers".into()));
+    }
+    Ok(())
+}
 
 /// Stored dimensions and EXIF orientation from the markers, without decoding the scan data. The
 /// file is refused, as a decode would refuse it, when it has no frame header, an unsupported frame
@@ -50,11 +76,7 @@ pub(crate) fn decode_with_fallback(bytes: &[u8], opts: &DecodeOptions, fallback:
         return Err(Error::Malformed(F, "no frame header".into()));
     }
     check_size(F, m.width as u64, m.height as u64, opts)?;
-    // The allocating decoders below parse the markers again, all of them: the count is capped so
-    // their quadratic/unbounded handling of APP1 metadata stays linear in file size.
-    if m.app1 > MAX_APP1 {
-        return Err(Error::Malformed(F, "too many APP1 markers".into()));
-    }
+    check_app1(bytes, &m)?;
     let raw = decode_via_craft_codecs(bytes, opts)?;
     // A raw container may carry the colour declaration of an otherwise untagged preview.
     // Apply it before linearization/resizing; existing JPEG metadata always wins.
@@ -161,9 +183,7 @@ pub(crate) fn decode_codes8(bytes: &[u8]) -> Result<(usize, usize, usize, Vec<u8
         return Err(Error::Malformed(F, "no frame header".into()));
     }
     check_size(F, m.width as u64, m.height as u64, &DecodeOptions::default())?;
-    if m.app1 > MAX_APP1 {
-        return Err(Error::Malformed(F, "too many APP1 markers".into()));
-    }
+    check_app1(bytes, &m)?;
     if !matches!(m.components, 1 | 3) || m.precision != 8 {
         return Err(Error::Malformed(F, "expected an 8-bit greyscale or RGB image".into()));
     }
@@ -468,8 +488,7 @@ mod tests {
         }
     }
 
-    /// Extended XMP is reassembled from every APP1 fragment: an unbounded count is quadratic
-    /// memory in a marker walk, so the count is capped.
+    /// An unbounded count of APP1 segments is capped before the decoders walk them again.
     #[test]
     fn an_app1_flood_is_refused_before_the_decoders_rewalk_it() {
         let mut b = vec![0xFF, 0xD8];
@@ -506,10 +525,7 @@ pub(crate) fn srgb8_fit(bytes: &[u8], max_w: u32, max_h: u32) -> Result<Option<(
     }
     let budget = DecodeOptions::default();
     check_size(F, m.width as u64, m.height as u64, &budget)?;
-    // as in the general decode: the decoders below walk every APP1 again
-    if m.app1 > MAX_APP1 {
-        return Err(Error::Malformed(F, "too many APP1 markers".into()));
-    }
+    check_app1(bytes, &m)?;
     let raw = decode_via_craft_codecs(bytes, &budget)?;
     let Buf::U8(px) = &raw.buf else { return Ok(None) };
     let ch = match raw.model {
@@ -686,6 +702,64 @@ mod srgb8_fit_tests {
         match srgb8_fit(&flood, 8, 8) {
             Err(Error::Malformed(_, m)) => assert!(m.contains("APP1"), "{m}"),
             other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    /// `b` with `segments` (marker, payload) inserted right after its SOI.
+    fn with_segments(b: &[u8], segments: &[(u8, Vec<u8>)]) -> Vec<u8> {
+        let mut out = b[..2].to_vec();
+        for (marker, payload) in segments {
+            out.extend_from_slice(&[0xFF, *marker]);
+            out.extend_from_slice(&u16::try_from(payload.len() + 2).unwrap().to_be_bytes());
+            out.extend_from_slice(payload);
+        }
+        out.extend_from_slice(&b[2..]);
+        out
+    }
+
+    /// A phone portrait's depth map stored as Extended XMP (#4815): a standard XMP packet that
+    /// links the extension, then `chunks` consistent extension segments of one GUID.
+    fn portrait_metadata(chunks: usize) -> Vec<(u8, Vec<u8>)> {
+        const GUID: &[u8; 32] = b"0123456789ABCDEF0123456789ABCDEF";
+        const CHUNK: usize = 64;
+        let standard = r#"<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"><rdf:Description xmlns:xmpNote="http://ns.adobe.com/xmp/note/" xmpNote:HasExtendedXMP="0123456789ABCDEF0123456789ABCDEF"/></rdf:RDF></x:xmpmeta>"#;
+        let mut segments = vec![(0xE1, [b"http://ns.adobe.com/xap/1.0/\0".as_slice(), standard.as_bytes()].concat())];
+        let full = u32::try_from(chunks * CHUNK).unwrap();
+        for k in 0..chunks {
+            let offset = u32::try_from(k * CHUNK).unwrap();
+            let payload =
+                [b"http://ns.adobe.com/xmp/extension/\0".as_slice(), GUID, &full.to_be_bytes(), &offset.to_be_bytes(), &[b' '; CHUNK]].concat();
+            segments.push((0xE1, payload));
+        }
+        segments
+    }
+
+    /// Extended XMP segments, which the decoders leave out, don't count towards the APP1 cap: a
+    /// file with hundreds of them decodes on every path and keeps its standard XMP packet.
+    #[test]
+    fn extended_xmp_segments_do_not_count_as_an_app1_flood() {
+        let b = jpeg(16, 16, |x, y| [x as u8 * 16, y as u8 * 16, 0]);
+        let portrait = with_segments(&b, &portrait_metadata(254));
+        let d = crate::decode(&portrait, DecodeOptions::default()).unwrap();
+        assert_eq!((d.width, d.height), (16, 16));
+        assert!(d.xmp.is_some_and(|x| x.contains("HasExtendedXMP")));
+        assert!(srgb8_fit(&portrait, 8, 8).unwrap().is_some());
+        assert!(decode_codes8(&portrait).is_ok());
+    }
+
+    /// The same file with a flood of other APP1 segments on top is still refused.
+    #[test]
+    fn other_app1_segments_beside_extended_xmp_are_still_capped() {
+        let b = jpeg(16, 16, |x, y| [x as u8 * 16, y as u8 * 16, 0]);
+        let mut segments = portrait_metadata(254);
+        segments.extend((0..200).map(|_| (0xE1, b"Exif\0\0".to_vec())));
+        let flood = with_segments(&b, &segments);
+        for result in [crate::decode(&flood, DecodeOptions::default()).map(drop), srgb8_fit(&flood, 8, 8).map(drop), decode_codes8(&flood).map(drop)]
+        {
+            match result {
+                Err(Error::Malformed(_, m)) => assert!(m.contains("APP1"), "{m}"),
+                other => panic!("unexpected: {other:?}"),
+            }
         }
     }
 }
