@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### The Print preview shows your edits
+- File ▸ Print's page preview shows a photo as you last edited it. Before, a photo edited in the Develop view with
+  the filmstrip hidden kept its old look in the preview (a Black & White conversion still showed in colour, issue
+  #4849). Printing and Print to PDF already used the edit.
+
 ### Heal meets its surroundings (process 14)
 - A healed spot is now pinned to the photo around its edge: on a gradient (a sky, a shaded wall, a cheek) it no
   longer leaves a faint disc or ring, and a dark line a few pixels or more beyond the spot's edge no longer smudges
