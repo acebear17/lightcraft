@@ -488,3 +488,29 @@ fn picture_package_and_custom_package_pages_can_print_cut_guide() {
         scroll(&mut h, 600.0);
     }
 }
+
+/// #4849: a photo edited while nothing else on screen showed its thumbnail (the Develop view with
+/// the filmstrip hidden) kept its old thumbnail in the page preview: Black & White still showed
+/// in colour there.
+#[test]
+fn the_print_preview_shows_an_edit_made_before_it_opened() {
+    let library = SyntheticLibrary::with_photos("print-preview-edit", 3);
+    let mut h = Headless::new(library.app(), [1400.0, 900.0], 1.0);
+    let id = h.app.session.visible_cloned()[0];
+    cmd(&mut h, "library.select", json!({"ids": [id.0]}));
+    let r = h.request("ui.set", json!({"view": "detail", "filmstrip": false}), T);
+    assert_eq!(r["ok"], true, "{r}");
+    assert!(h.settle(T), "the loupe settles");
+    let before = h.app.renderer.thumb(id).map(|t| t.key);
+    assert!(before.is_some(), "the photo has a thumbnail before the edit");
+    cmd(&mut h, "develop.treatment", json!({"bw": true}));
+    open_print(&mut h);
+    assert!(h.settle(T), "the preview settles");
+    assert_ne!(h.app.renderer.thumb(id).map(|t| t.key), before, "the preview's thumbnail is rendered again for the edit");
+    let built = h.app.renderer.thumb_jobs_built;
+    for _ in 0..60 {
+        h.step();
+    }
+    assert_eq!(h.app.renderer.thumb_jobs_built, built, "then nothing is rebuilt while nothing changes");
+    assert_eq!(h.app.renderer.in_flight(), 0);
+}

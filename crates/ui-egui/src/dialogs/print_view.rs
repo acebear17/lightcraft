@@ -887,13 +887,11 @@ fn paint_cell(
     }
     let clip = painter.with_clip_rect(avail.intersect(painter.clip_rect()));
     let tex = photo.and_then(|id| {
-        // Use the library's thumbnail when there is one. A thumbnail is kept at one size, so asking
-        // for another size here every frame made the preview and the grid behind the dialog
-        // re-render each other's thumbnail for as long as the dialog stayed open.
-        if app.renderer.thumb(id).is_none() {
-            let px = (shown.width().max(shown.height()) * 2.0).clamp(64.0, 1024.0) as usize;
-            crate::panels::grid::request_thumb(app, id, px, 10);
-        }
+        // Ask every frame, as the grid does: `request_thumb` renders again only when the photo was
+        // edited since its thumbnail, and a larger thumbnail already here (or on its way) serves
+        // this cell, so the preview and the grid behind it don't replace each other's render.
+        let px = (shown.width().max(shown.height()) * 2.0).clamp(64.0, 1024.0) as usize;
+        crate::panels::grid::request_thumb(app, id, px, 10);
         app.renderer.thumb(id).map(|tex| tex.id())
     });
     match tex {
